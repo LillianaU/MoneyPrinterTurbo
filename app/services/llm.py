@@ -888,6 +888,9 @@ def generate_terms(
             '"search term 4", "search term 5"]'
         )
 
+    # 库存素材库（Pexels、Pixabay、Coverr）只收录具体可见的画面。抽象概念类
+    # 关键词（如 "self love journey"）在这些库里搜不到素材，任务会在素材阶段
+    # 失败。因此强制模型把主题的情感/概念转写成可拍摄的视觉描述。
     prompt = f"""
 # Role: Video Search Terms Generator
 
@@ -899,7 +902,8 @@ def generate_terms(
 2. each search term should consist of 1-3 words, always add the main subject of the video.
 3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
 4. the search terms must be related to the subject of the video.
-5. reply with english search terms only.
+5. each term must describe something concrete that a stock-video library actually films: objects, places, scenes, or people doing visible actions. never use abstract concepts, feelings, or metaphors such as "self love journey" or "personal growth"; express those ideas through visible imagery instead, for example "woman smiling at sunrise" or "person walking in nature".
+6. reply with english search terms only.
 {ordering_rule}
 
 ## Output Example:
