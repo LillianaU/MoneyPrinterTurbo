@@ -500,7 +500,9 @@ class TestMaterialTlsVerification(unittest.TestCase):
                     minimum_duration=1,
                     video_aspect=aspect,
                 )
-                request_url = get.call_args.args[0]
+                # 空结果会触发覆盖度兜底的重试（不带筛选）。断言首轮请求
+                # 仍携带方向筛选，这是该测试要保护的既有行为。
+                request_url = get.call_args_list[0].args[0]
 
             self.assertIn("page_size=20", request_url)
             if expected_filter:

@@ -603,93 +603,130 @@ def search_videos_coverr(
     aspect = VideoAspect(video_aspect)
     api_key = get_api_key("coverr_api_keys")
     headers = {"Authorization": f"Bearer {api_key}"}
-    params = {
-        "query": search_term,
-        "page_size": 20,
-        "urls": "true",
-        "sort": "popular",
-    }
+
+    def _search_coverr_once(
+        term: str, filter_param: str | None, strict_aspect: bool
+    ) -> List[MaterialInfo]:
+        params = {
+            "query": term,
+            "page_size": 20,
+            "urls": "true",
+            "sort": "popular",
+        }
+        if filter_param:
+            params["filter"] = filter_param
+        query_url = f"https://api.coverr.co/videos?{urlencode(params)}"
+        logger.info(f"searching videos on coverr: term={term!r}")
+
+        try:
+            r = requests.get(
+                query_url,
+                headers=headers,
+                proxies=config.proxy,
+                verify=_get_tls_verify(),
+                timeout=(30, 60),
+            )
+            response = r.json()
+            video_items: List[MaterialInfo] = []
+
+            if not isinstance(response, dict) or not isinstance(
+                response.get("hits"), list
+            ):
+                logger.error("coverr video search returned an unsupported response")
+                return video_items
+
+            for v in response["hits"]:
+                if not isinstance(v, dict):
+                    continue
+                # duration 在不同响应里可能是 number(11.625) 或 string("10.500000")
+                try:
+                    duration = int(float(v.get("duration") or 0))
+                except (OverflowError, TypeError, ValueError):
+                    continue
+                if duration < minimum_duration:
+                    continue
+
+                video_id = v.get("id")
+                urls = v.get("urls")
+                if not isinstance(urls, dict):
+                    continue
+                mp4_download_url = urls.get("mp4_download")
+                if (
+                    not video_id
+                    or not isinstance(mp4_download_url, str)
+                    or not mp4_download_url
+                ):
+                    continue
+                if (
+                    strict_aspect
+                    and aspect != VideoAspect.square
+                    and not _matches_video_aspect(
+                        v.get("max_width"),
+                        v.get("max_height"),
+                        aspect,
+                        is_vertical=v.get("is_vertical"),
+                    )
+                ):
+                    continue
+
+                item = MaterialInfo()
+                item.provider = "coverr"
+                item.url = mp4_download_url
+                item.duration = duration
+                item.source_info = {
+                    "provider": "coverr",
+                    "search_term": term,
+                    "asset_id": str(video_id),
+                    "source_page": _safe_public_url(
+                        v.get("canonical_url") or v.get("url")
+                    ),
+                    "creator": _creator_info(v.get("creator") or v.get("author")),
+                    "rendition": {
+                        "id": "mp4_download",
+                        "width": v.get("max_width"),
+                        "height": v.get("max_height"),
+                    },
+                }
+                video_items.append(item)
+            return video_items
+        except Exception as e:
+            logger.error(
+                "coverr video search failed: "
+                f"error={type(e).__name__}, detail={_redact_request_error(e, api_key)}"
+            )
+
+        return []
+
     # 服务端方向筛选可以直接从完整搜索结果中返回目标素材，避免先取热门结果再
     # 本地过滤导致竖屏候选为空。方形素材没有对应布尔条件，继续依赖本地宽高校验。
+    filter_param = None
     if aspect == VideoAspect.portrait:
-        params["filter"] = "is_vertical:true"
+        filter_param = "is_vertical:true"
     elif aspect == VideoAspect.landscape:
-        params["filter"] = "is_vertical:false"
-    query_url = f"https://api.coverr.co/videos?{urlencode(params)}"
-    logger.info(f"searching videos on coverr: term={search_term!r}")
+        filter_param = "is_vertical:false"
 
-    try:
-        r = requests.get(
-            query_url,
-            headers=headers,
-            proxies=config.proxy,
-            verify=_get_tls_verify(),
-            timeout=(30, 60),
+    # 覆盖度兜底阶梯（实测 Coverr 搜索非常字面化）：
+    # 1. 完整关键词 + 方向筛选（既有行为）。
+    # 2. 完整关键词不过滤——部分关键词在方向筛选下为空，但完整库里有素材
+    #    （实测 "wind turbine" 竖屏 0 条，不过滤有 5 条）。
+    # 3. 简化关键词——多词组里的专业词（如 "scrum team meeting"）搜不到，
+    #    去掉首词后（"team meeting"）有候选。兜底轮放宽本地方向校验，交给
+    #    视频合成阶段的 cover 模式裁剪，比直接让任务失败更可用。
+    video_items = _search_coverr_once(search_term, filter_param, strict_aspect=True)
+    if not video_items and filter_param is not None:
+        logger.info(
+            "coverr aspect-filtered search returned no candidates, "
+            f"retrying without filter: term={search_term!r}"
         )
-        response = r.json()
-        video_items: List[MaterialInfo] = []
-
-        if not isinstance(response, dict) or not isinstance(
-            response.get("hits"), list
-        ):
-            logger.error("coverr video search returned an unsupported response")
-            return video_items
-
-        for v in response["hits"]:
-            if not isinstance(v, dict):
-                continue
-            # duration 在不同响应里可能是 number(11.625) 或 string("10.500000")
-            try:
-                duration = int(float(v.get("duration") or 0))
-            except (OverflowError, TypeError, ValueError):
-                continue
-            if duration < minimum_duration:
-                continue
-
-            video_id = v.get("id")
-            urls = v.get("urls")
-            if not isinstance(urls, dict):
-                continue
-            mp4_download_url = urls.get("mp4_download")
-            if (
-                not video_id
-                or not isinstance(mp4_download_url, str)
-                or not mp4_download_url
-            ):
-                continue
-            if aspect != VideoAspect.square and not _matches_video_aspect(
-                v.get("max_width"),
-                v.get("max_height"),
-                aspect,
-                is_vertical=v.get("is_vertical"),
-            ):
-                continue
-
-            item = MaterialInfo()
-            item.provider = "coverr"
-            item.url = mp4_download_url
-            item.duration = duration
-            item.source_info = {
-                "provider": "coverr",
-                "search_term": search_term,
-                "asset_id": str(video_id),
-                "source_page": _safe_public_url(v.get("canonical_url") or v.get("url")),
-                "creator": _creator_info(v.get("creator") or v.get("author")),
-                "rendition": {
-                    "id": "mp4_download",
-                    "width": v.get("max_width"),
-                    "height": v.get("max_height"),
-                },
-            }
-            video_items.append(item)
-        return video_items
-    except Exception as e:
-        logger.error(
-            "coverr video search failed: "
-            f"error={type(e).__name__}, detail={_redact_request_error(e, api_key)}"
+        video_items = _search_coverr_once(search_term, None, strict_aspect=True)
+    if not video_items and len(search_term.split()) > 1:
+        simplified_term = " ".join(search_term.split()[1:])
+        logger.info(
+            "coverr search returned no candidates, "
+            f"retrying with simplified term: {simplified_term!r}"
         )
-
-    return []
+        video_items = _search_coverr_once(simplified_term, None, strict_aspect=False)
+    return video_items
 
 
 # WaveSpeed AI (https://wavespeed.ai) 通过文生视频模型按脚本关键词直接生成素材，
